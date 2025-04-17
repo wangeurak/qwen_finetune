@@ -26,7 +26,7 @@ set_seed(SEED)
 # 配置参数（与训练时一致）
 # ----------------------
 MODEL_NAME = r"D:\Qwen\Qwen2.5-0.5B-Instruct"  # 原始模型路径
-SAVE_DIR = r"D:\Qwen\qwen_huatuo_lora_test1"         # 微调模型保存路径
+SAVE_DIR = r"D:\Qwen\qwen_huatuo_lora"         # 微调模型保存路径
 use_4bit = True  # 是否使用 4-bit 量化
 
 # 量化配置（与训练时一致）
@@ -42,7 +42,7 @@ bnb_config = BitsAndBytesConfig(
 tokenizer = AutoTokenizer.from_pretrained(
     SAVE_DIR,  # 从保存路径加载分词器
     trust_remote_code=True,
-    model_max_length=1024,
+    model_max_length=512,
     padding_side="right"
 )
 if tokenizer.pad_token is None:
@@ -51,7 +51,7 @@ if tokenizer.pad_token is None:
 # ----------------------
 # 加载基础模型
 # ----------------------
-model = AutoModelForCausalLM.from_pretrained(
+base_model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,  # 加载原始 Qwen2.5-0.5B-Instruct 模型
     device_map="auto",
     quantization_config=bnb_config if use_4bit else None,
@@ -61,12 +61,12 @@ model = AutoModelForCausalLM.from_pretrained(
 # ----------------------
 # 加载 LoRA 适配器
 # ----------------------
-# model = PeftModel.from_pretrained(
-#     base_model,
-#     SAVE_DIR,  # 从保存路径加载 LoRA 适配器
-#     is_trainable=False,  # 推理模式
-#     device_map="auto"
-# )
+model = PeftModel.from_pretrained(
+    base_model,
+    SAVE_DIR,  # 从保存路径加载 LoRA 适配器
+    is_trainable=False,  # 推理模式
+    device_map="auto"
+)
 
 # 确保模型处于评估模式
 model.eval()
@@ -87,8 +87,9 @@ def generate_response(query):
         attention_mask=inputs["attention_mask"],  # 显式传递 attention_mask
         max_new_tokens=1000,
         temperature=0.7,
-        top_p=0.9,
-        do_sample=True
+        top_p=0.8,
+        do_sample=True,
+        # repetition_penalty=1.2,
     )
     return tokenizer.decode(outputs[0], skip_special_tokens=True).split("assistant\n")[-1]
 

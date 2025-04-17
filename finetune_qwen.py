@@ -43,7 +43,7 @@ def format_instruction(example):
     return {
         "text": f"<|im_start|>system\n你是一个医疗百科助手<|im_end|>\n"
                 f"<|im_start|>user\n{question}<|im_end|>\n"
-                f"<|im_start|>assistant\n{answer}<|im_end|>"
+                f"<|im_start|>assistant\n{answer}<|im_end|>\n"
     }
 
 dataset = load_dataset(
@@ -70,11 +70,13 @@ tokenizer = AutoTokenizer.from_pretrained(
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.unk_token or "<|PAD|>"
     tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids(tokenizer.pad_token)
+    print('break')
 
-print("Train dataset samples:", dataset["train"].select(range(5))["text"])
-print("Validation dataset samples:", dataset["validation"].select(range(5))["text"])
+print(f"原始 pad_token: {tokenizer.pad_token}, pad_token_id: {tokenizer.pad_token_id}")
+
 lengths = [len(tokenizer.encode(sample["text"])) for sample in dataset["train"]]
 print(f"Train dataset stats: Min length={min(lengths)}, Max length={max(lengths)}, Mean length={sum(lengths)/len(lengths)}")
+
 # 加载模型
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
@@ -87,7 +89,7 @@ model = AutoModelForCausalLM.from_pretrained(
 
 # LoRA 配置
 lora_config = LoraConfig(
-    r=8,
+    r=4,
     lora_alpha=32,
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
     lora_dropout=0.1,
@@ -103,10 +105,10 @@ training_args = TrainingArguments(
     per_device_train_batch_size=4,
     gradient_accumulation_steps=4,
     max_grad_norm=1.0,
-    learning_rate=1e-4,
-    num_train_epochs=2,
+    learning_rate=5e-5,
+    num_train_epochs=1,
     logging_steps=10,
-    eval_steps=200,
+    eval_steps=500,
     save_steps=500,
     save_total_limit=2,
     fp16=not use_4bit,
