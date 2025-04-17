@@ -4,12 +4,29 @@ from peft import PeftModel
 from datasets import load_from_disk
 from transformers import BitsAndBytesConfig
 import os
+import random
+import numpy as np
+
+# ----------------------
+# 设置随机种子以确保可复现性
+# ----------------------
+def set_seed(seed):
+    random.seed(seed)  # 设置 Python 随机种子
+    np.random.seed(seed)  # 设置 NumPy 随机种子
+    torch.manual_seed(seed)  # 设置 PyTorch CPU 随机种子
+    torch.cuda.manual_seed_all(seed)  # 设置 PyTorch GPU 随机种子
+    # 确保 CuDNN 使用确定性算法
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+# 设置固定的随机种子
+SEED = 42
+set_seed(SEED)
 
 # ----------------------
 # 配置参数（与训练时一致）
 # ----------------------
 MODEL_NAME = r"D:\Qwen\Qwen2.5-0.5B-Instruct"  # 原始模型路径
-SAVE_DIR = r"D:\Qwen\qwen_huatuo_lora"         # 微调模型保存路径
+SAVE_DIR = r"D:\Qwen\qwen_huatuo_lora_test1"         # 微调模型保存路径
 use_4bit = True  # 是否使用 4-bit 量化
 
 # 量化配置（与训练时一致）
@@ -26,13 +43,15 @@ tokenizer = AutoTokenizer.from_pretrained(
     SAVE_DIR,  # 从保存路径加载分词器
     trust_remote_code=True,
     model_max_length=1024,
-    padding_side="left"
+    padding_side="right"
 )
-
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.unk_token or tokenizer.eos_token
+    tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids(tokenizer.pad_token)
 # ----------------------
 # 加载基础模型
 # ----------------------
-base_model = AutoModelForCausalLM.from_pretrained(
+model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,  # 加载原始 Qwen2.5-0.5B-Instruct 模型
     device_map="auto",
     quantization_config=bnb_config if use_4bit else None,
@@ -42,12 +61,12 @@ base_model = AutoModelForCausalLM.from_pretrained(
 # ----------------------
 # 加载 LoRA 适配器
 # ----------------------
-model = PeftModel.from_pretrained(
-    base_model,
-    SAVE_DIR,  # 从保存路径加载 LoRA 适配器
-    is_trainable=False,  # 推理模式
-    device_map="auto"
-)
+# model = PeftModel.from_pretrained(
+#     base_model,
+#     SAVE_DIR,  # 从保存路径加载 LoRA 适配器
+#     is_trainable=False,  # 推理模式
+#     device_map="auto"
+# )
 
 # 确保模型处于评估模式
 model.eval()
@@ -61,9 +80,11 @@ def generate_response(query):
         f"<|im_start|>user\n{query}<|im_end|>\n"
         f"<|im_start|>assistant\n"
     )
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
+    inputs = {k: v.to(model.device) for k, v in inputs.items()}
     outputs = model.generate(
-        inputs.input_ids,
+        input_ids=inputs["input_ids"],
+        attention_mask=inputs["attention_mask"],  # 显式传递 attention_mask
         max_new_tokens=1000,
         temperature=0.7,
         top_p=0.9,

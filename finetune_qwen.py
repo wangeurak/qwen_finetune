@@ -5,19 +5,18 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     TrainingArguments,
-    BitsAndBytesConfig
+    BitsAndBytesConfig,
+    DataCollatorForLanguageModeling
 )
 from peft import LoraConfig, get_peft_model
 from trl import SFTTrainer
-import inspect
-# ----------------------
-# 配置参数（按需修改）
-# ----------------------
-DATASET_PATH = r"D:\Qwen\huatuo_encyclopedia_qa"  # 数据集路径
-MODEL_NAME = r"D:\Qwen\Qwen2.5-0.5B-Instruct"        # 模型名称（会自动从ModelScope下载）
-SAVE_DIR = r"D:\Qwen\qwen_huatuo_lora"                  # 微调后模型保存路径
+import pandas as pd
+import re
 
-# 量化配置（显存<8GB时启用）
+# 配置参数
+DATASET_PATH = r"D:\Qwen\huatuo_encyclopedia_qa"
+MODEL_NAME = r"D:\Qwen\Qwen2.5-0.5B-Instruct"
+SAVE_DIR = r"D:\Qwen\qwen_huatuo_lora"
 use_4bit = True
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
@@ -25,18 +24,28 @@ bnb_config = BitsAndBytesConfig(
     bnb_4bit_compute_dtype=torch.bfloat16,
 )
 
-# ----------------------
 # 数据预处理
-# ----------------------
 def format_instruction(example):
-    """将数据转换为Qwen指令格式"""
+    import re
+    question = example['questions']
+    if isinstance(question, list) and len(question) > 0:
+        flat_questions = [q for sublist in question for q in (sublist if isinstance(sublist, list) else [sublist])]
+        question = flat_questions[0] if flat_questions else ""
+    question = re.sub(r'\[.*?\]', '', question)
+    question = re.sub(r'\s+', ' ', question).strip()
+
+    answer = example['answers']
+    if isinstance(answer, list) and len(answer) > 0:
+        answer = answer[0]
+    answer = re.sub(r'\n+', '\n', answer)
+    answer = re.sub(r'\s+', ' ', answer).strip()
+
     return {
         "text": f"<|im_start|>system\n你是一个医疗百科助手<|im_end|>\n"
-                f"<|im_start|>user\n{example['questions']}<|im_end|>\n"
-                f"<|im_start|>assistant\n{example['answers']}<|im_end|>"
+                f"<|im_start|>user\n{question}<|im_end|>\n"
+                f"<|im_start|>assistant\n{answer}<|im_end|>"
     }
 
-# 加载本地数据集
 dataset = load_dataset(
     "json",
     data_files={
@@ -45,96 +54,84 @@ dataset = load_dataset(
     }
 )
 dataset = dataset.map(format_instruction, remove_columns=dataset["train"].column_names)
-dataset["train"] = dataset["train"].select(range(1000))
+dataset["train"] = dataset["train"].select(range(2000))
 dataset["validation"] = dataset["validation"].select(range(200))
+print("Train dataset samples:")
+for i, text in enumerate(dataset["train"].select(range(5))["text"]):
+    print(f"样本 {i}: {text}\n{'-'*50}")
 
-# ----------------------
-# 加载模型和分词器
-# ----------------------
+# 加载分词器
 tokenizer = AutoTokenizer.from_pretrained(
     MODEL_NAME,
     trust_remote_code=True,
-    model_max_length=1024,  # 设置最大长度
-    padding_side="left"  # 生成时需左对齐
+    model_max_length=1024,
+    padding_side="right"
 )
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.unk_token or "<|PAD|>"
+    tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids(tokenizer.pad_token)
+
+print("Train dataset samples:", dataset["train"].select(range(5))["text"])
+print("Validation dataset samples:", dataset["validation"].select(range(5))["text"])
+lengths = [len(tokenizer.encode(sample["text"])) for sample in dataset["train"]]
+print(f"Train dataset stats: Min length={min(lengths)}, Max length={max(lengths)}, Mean length={sum(lengths)/len(lengths)}")
+# 加载模型
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
     device_map="auto",
     quantization_config=bnb_config if use_4bit else None,
-    trust_remote_code=True
+    trust_remote_code=True,
+    attn_implementation="eager",
+    sliding_window=None  # 禁用滑动窗口
 )
 
-# ----------------------
-# LoRA配置
-# ----------------------
+# LoRA 配置
 lora_config = LoraConfig(
     r=8,
     lora_alpha=32,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-    lora_dropout=0.05,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+    lora_dropout=0.1,
     bias="none",
     task_type="CAUSAL_LM",
-    inference_mode=False,  # 训练模式
+    inference_mode=False,
 )
 model = get_peft_model(model, lora_config)
-model.print_trainable_parameters()  # 输出可训练参数量（应≈0.5%）
 
-# ----------------------
 # 训练配置
-# ----------------------
 training_args = TrainingArguments(
     output_dir=SAVE_DIR,
-    per_device_train_batch_size=8,
+    per_device_train_batch_size=4,
     gradient_accumulation_steps=4,
-    learning_rate=2e-4,
-    num_train_epochs=3,
-    logging_steps=50,
-    eval_steps=200,                # 保留 eval_steps
+    max_grad_norm=1.0,
+    learning_rate=1e-4,
+    num_train_epochs=2,
+    logging_steps=10,
+    eval_steps=200,
     save_steps=500,
-    save_total_limit=2,            # 限制保存的模型数量
+    save_total_limit=2,
     fp16=not use_4bit,
     report_to="wandb",
-    run_name="qwen_huatuo_finetune",  # 自定义运行名称
-    logging_dir="./logs",              # 日志目录
+    run_name="qwen_huatuo_finetune",
+    logging_dir="./logs",
 )
-# print(inspect.signature(SFTTrainer.__init__))
+
+# 初始化 SFTTrainer
 trainer = SFTTrainer(
     model=model,
     args=training_args,
     train_dataset=dataset["train"],
     eval_dataset=dataset["validation"],
-    processing_class=tokenizer,        # 替换为 processing_class
+    processing_class=tokenizer,
+    data_collator=DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False,
+        pad_to_multiple_of=8
+    )
 )
 
-# ----------------------
 # 开始训练
-# ----------------------
 trainer.train()
 
-# ----------------------
 # 保存模型
-# ----------------------
 model.save_pretrained(SAVE_DIR)
 tokenizer.save_pretrained(SAVE_DIR)
-
-# ----------------------
-# 推理测试
-# ----------------------
-def generate_response(query):
-    prompt = (
-        f"<|im_start|>system\n你是一个医疗百科助手<|im_end|>\n"
-        f"<|im_start|>user\n{query}<|im_end|>\n"
-        f"<|im_start|>assistant\n"
-    )
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    outputs = model.generate(
-        inputs.input_ids,
-        max_new_tokens=300,
-        temperature=0.7,
-        top_p=0.9,
-        do_sample=True
-    )
-    return tokenizer.decode(outputs[0], skip_special_tokens=True).split("assistant\n")[-1]
-
-# 测试样例
-print(generate_response("如何预防高血压？"))
